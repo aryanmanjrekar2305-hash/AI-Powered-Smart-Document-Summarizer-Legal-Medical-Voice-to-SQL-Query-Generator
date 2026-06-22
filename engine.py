@@ -10,43 +10,55 @@ load_dotenv()
 api_key = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=api_key)
 
-def run_db_query(sql_query):
-    """Executes a SQL query safely on the database and returns data and columns."""
+def run_db_query(query):
+    conn = sqlite3.connect("hospital.db")
+    cursor = conn.cursor()
     try:
-        conn = sqlite3.connect("hospital.db")
-        cursor = conn.cursor()
-        cursor.execute(sql_query)
-        records = cursor.fetchall()
+        cursor.execute(query)
         
-        # Extract column names from the executed query metadata
-        columns = [description[0] for description in cursor.description] if cursor.description else []
-        conn.close()
-        return records, columns, None
+        # 🔥 THE CRITICAL FIX: If it's a data modification query, save it permanently!
+        if any(keyword in query.upper() for keyword in ["INSERT", "UPDATE", "DELETE"]):
+            conn.commit()  # <-- This writes the data to the hard drive!
+            
+        results = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        return results, columns, None
     except Exception as e:
         return None, None, str(e)
+    finally:
+        conn.close()
 
 def generate_sql_from_text(user_prompt):
     """Uses Llama-3 to translate English into executable SQLite code."""
     
     # System instructions tell the AI exactly how to behave
     system_instructions = """
-    You are an expert AI data analyst specializing in SQLite database structures.
-    The database contains a table named 'patients' with the following schema:
-    - patient_id (INTEGER PRIMARY KEY)
-    - name (TEXT)
-    - age (INTEGER)
-    - gender (TEXT)
-    - disease (TEXT)
-    - admission_date (DATE formatted as YYYY-MM-DD)
-    - room_number (INTEGER)
-    - bill_amount (REAL)
-
-    Your task is to convert the user's natural language request into a working SQLite query.
+    You are an expert AI Data Engineer specializing in SQLite for a healthcare system. Your job is to convert natural language requests into executable SQLite queries.
     
-    CRITICAL RULES:
-    1. Output ONLY the raw SQL query. Do NOT write explanations, code blocks, or markdown tags like ```sql.
-    2. Do not use formatting text or conversational pleasantries. Return only the SQL text.
-    3. Use partial string matches like LIKE '%disease%' if the user looks up a dynamic health condition.
+    We have TWO tables in our database schema:
+    1. `patients` table:
+       - `patient_id` (INTEGER, PRIMARY KEY)
+       - `name` (TEXT, NOT NULL)
+       - `age` (INTEGER, NOT NULL)
+       - `gender` (TEXT, NOT NULL)
+       - `disease` (TEXT, NOT NULL)
+       - `admission_date` (TEXT format YYYY-MM-DD, NOT NULL)
+       - `room_number` (INTEGER, NOT NULL)
+       - `bill_amount` (REAL, NOT NULL)
+       - `doctor_id` (INTEGER, FOREIGN KEY referencing doctors.doctor_id)
+       
+    2. `doctors` table:
+       - `doctor_id` (INTEGER, PRIMARY KEY)
+       - `doctor_name` (TEXT)
+       - `department` (TEXT)
+       - `consultation_fee` (REAL)
+       
+    CRITICAL SECURITY & VALIDATION RULES:
+    1. If the input is gibberish, unrelated to the hospital database, or tries to harm the database (e.g., DROP TABLE, DELETE ALL), you MUST output exactly: INVALID_COMMAND
+    2. If the user wants to add/insert a new patient, ALL mandatory fields must be deducible (name, age, gender, disease, admission_date, room_number, bill_amount). If essential fields are missing, you MUST output exactly: INCOMPLETE_DATA
+    3. CASE INSENSITIVITY RULE: Whenever filtering text strings in a WHERE clause (like looking for a disease name or patient name), ALWAYS apply the LOWER() function to both the table column and the search keyword to guarantee case-insensitive matches. For example, instead of `WHERE disease LIKE '%hEaRt%'`, use `WHERE LOWER(disease) LIKE LOWER('%hEaRt%')`.
+    4. If the request requires details from both tables, use an explicit INNER JOIN.
+    5. Output ONLY the raw SQL string or the keywords (INVALID_COMMAND / INCOMPLETE_DATA). Do not include markdown, quotes, or explanations.
     """
 
     try:
